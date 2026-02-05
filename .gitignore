@@ -13,6 +13,7 @@ output/*
 !output/.keep
 pipeline.log
 processed_history.json
+config.json
 
 # IDE
 .vscode/

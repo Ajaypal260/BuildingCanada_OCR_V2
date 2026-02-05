@@ -84,7 +84,7 @@ logger = logging.getLogger(__name__)
 # System Prompt for Document Transcription
 # ============================================================================
 
-SYSTEM_PROMPT = """You are a document transcription agent. Convert the image provided into strict Markdown.
+DEFAULT_SYSTEM_PROMPT = """You are a document transcription agent. Convert the image provided into strict Markdown.
 
 Rules:
 - Transcribe ALL text content exactly as it appears in the document.
@@ -126,6 +126,19 @@ def create_client(base_url: str = LM_STUDIO_BASE_URL) -> OpenAI:
         api_key=LM_STUDIO_API_KEY,
         timeout=120.0  # Increase timeout for vision model processing
     )
+
+
+def test_connection(base_url: str) -> tuple[bool, str]:
+    """
+    Test connection to the LM Studio server.
+    Returns (success: bool, message: str)
+    """
+    try:
+        client = create_client(base_url)
+        client.models.list()
+        return True, "Successfully connected to LM Studio"
+    except Exception as e:
+        return False, f"Connection Failed: {str(e)}"
 
 
 def load_processed_history() -> dict:
@@ -185,7 +198,8 @@ def process_image_with_vision(
     image: Image.Image,
     page_num: int,
     total_pages: int,
-    model_name: str = MODEL_NAME
+    model_name: str = MODEL_NAME,
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT
 ) -> Optional[str]:
     """
     Send an image to the DeepSeek Vision model and get Markdown output.
@@ -196,6 +210,7 @@ def process_image_with_vision(
         page_num: Current page number (for logging)
         total_pages: Total number of pages (for logging)
         model_name: Name of the model to use
+        system_prompt: System prompt for the model
     
     Returns:
         Markdown string or None if processing failed
@@ -211,7 +226,7 @@ def process_image_with_vision(
                 messages=[
                     {
                         "role": "system",
-                        "content": SYSTEM_PROMPT
+                        "content": system_prompt
                     },
                     {
                         "role": "user",
@@ -307,17 +322,25 @@ def process_page_task(args: tuple) -> tuple[int, Optional[str]]:
     Worker function for parallel page processing.
     
     Args:
-        args: Tuple of (client, image, page_num, total_pages, model_name)
+        args: Tuple of (client, image, page_num, total_pages, model_name, system_prompt)
     
     Returns:
         Tuple of (page_num, markdown_content or None)
     """
-    client, image, page_num, total_pages, model_name = args
-    result = process_image_with_vision(client, image, page_num, total_pages, model_name)
+    client, image, page_num, total_pages, model_name, system_prompt = args
+    result = process_image_with_vision(client, image, page_num, total_pages, model_name, system_prompt)
     return (page_num, result)
 
 
-def process_pdf(pdf_path: Path, output_dir: Path, client: OpenAI, model_name: str = MODEL_NAME) -> bool:
+def process_pdf(
+    pdf_path: Path, 
+    output_dir: Path, 
+    client: OpenAI, 
+    model_name: str = MODEL_NAME,
+    max_workers: int = MAX_WORKERS,
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+    stop_event = None
+) -> bool:
     """
     Process a single PDF file: convert pages to images, send to vision model,
     and save the combined Markdown output.
@@ -326,6 +349,9 @@ def process_pdf(pdf_path: Path, output_dir: Path, client: OpenAI, model_name: st
         pdf_path: Path to the PDF file
         client: OpenAI client instance
         model_name: Name of the model to use
+        max_workers: Number of parallel workers
+        system_prompt: System prompt for the model
+        stop_event: Threading event to check for cancellation
     
     Returns:
         True if processing succeeded, False otherwise
@@ -346,25 +372,32 @@ def process_pdf(pdf_path: Path, output_dir: Path, client: OpenAI, model_name: st
         # Process pages (parallel or sequential based on MAX_WORKERS)
         page_results: dict[int, str] = {}
         
-        if MAX_WORKERS > 1:
+        # Process pages (parallel or sequential based on max_workers)
+        page_results: dict[int, str] = {}
+        
+        if max_workers > 1:
             # Parallel processing
-            logger.info(f"Processing {total_pages} pages in parallel (max {MAX_WORKERS} workers)")
+            logger.info(f"Processing {total_pages} pages in parallel (max {max_workers} workers)")
             
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # Prepare tasks
-                tasks = [
-                    (client, img, i + 1, total_pages, model_name)
-                    for i, img in enumerate(images)
-                ]
-                
-                # Submit all tasks
-                futures = {
-                    executor.submit(process_page_task, task): task[2]  # task[2] is page_num
-                    for task in tasks
-                }
+                futures = {}
+                for i, img in enumerate(images):
+                    if stop_event and stop_event.is_set():
+                        logger.warning("Processing stopped by user.")
+                        return False
+                        
+                    task = (client, img, i + 1, total_pages, model_name, system_prompt)
+                    future = executor.submit(process_page_task, task)
+                    futures[future] = i + 1
                 
                 # Collect results
                 for future in as_completed(futures):
+                    if stop_event and stop_event.is_set():
+                        logger.warning("Processing stopped by user. Waiting for pending tasks...")
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        return False
+
                     page_num = futures[future]
                     try:
                         result_page_num, markdown = future.result()
@@ -377,8 +410,12 @@ def process_pdf(pdf_path: Path, output_dir: Path, client: OpenAI, model_name: st
             logger.info(f"Processing {total_pages} pages sequentially")
             
             for i, image in enumerate(images):
+                if stop_event and stop_event.is_set():
+                    logger.warning("Processing stopped by user.")
+                    return False
+
                 page_num = i + 1
-                markdown = process_image_with_vision(client, image, page_num, total_pages, model_name)
+                markdown = process_image_with_vision(client, image, page_num, total_pages, model_name, system_prompt)
                 if markdown:
                     page_results[page_num] = markdown
         
@@ -419,7 +456,10 @@ def scan_and_process(
     output_dir: Path = OUTPUT_DIR, 
     progress_callback: Optional[Callable[[int, int], None]] = None,
     base_url: str = LM_STUDIO_BASE_URL,
-    model_name: str = MODEL_NAME
+    model_name: str = MODEL_NAME,
+    max_workers: int = MAX_WORKERS,
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+    stop_event = None
 ):
     """
     Scan the input directory for PDF files and process them.
@@ -465,6 +505,10 @@ def scan_and_process(
     processed_count = 0
     
     for pdf_path in pdf_files:
+        if stop_event and stop_event.is_set():
+            logger.warning("Batch processing stopped by user.")
+            break
+
         processed_count += 1
         
         if progress_callback:
@@ -475,7 +519,15 @@ def scan_and_process(
             results["skipped"].append(pdf_path.name)
             continue
 
-        success = process_pdf(pdf_path, output_dir, client, model_name)
+        success = process_pdf(
+            pdf_path, 
+            output_dir, 
+            client, 
+            model_name,
+            max_workers=max_workers,
+            system_prompt=system_prompt,
+            stop_event=stop_event
+        )
         if success:
             results["success"].append(pdf_path.name)
             mark_file_as_processed(pdf_path.name)
@@ -499,7 +551,9 @@ def watch_folder(
     output_dir: Path = OUTPUT_DIR, 
     stop_event=None,
     base_url: str = LM_STUDIO_BASE_URL,
-    model_name: str = MODEL_NAME
+    model_name: str = MODEL_NAME,
+    max_workers: int = MAX_WORKERS,
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT
 ):
     """
     Continuously watch the input folder for new PDF files.
@@ -540,7 +594,15 @@ def watch_folder(
                     break
                     
                 if pdf_path.name not in processed_files:
-                    success = process_pdf(pdf_path, output_dir, client, model_name)
+                    success = process_pdf(
+                        pdf_path, 
+                        output_dir, 
+                        client, 
+                        model_name,
+                        max_workers=max_workers,
+                        system_prompt=system_prompt,
+                        stop_event=stop_event
+                    )
                     
                     if success:
                         # Move to processed folder
