@@ -141,12 +141,30 @@ class OCRApp(ctk.CTk):
         self.watch_checkbox = ctk.CTkCheckBox(self.sidebar_frame, text="Watch Mode", variable=self.watch_mode_var)
         self.watch_checkbox.grid(row=7, column=0, padx=20, pady=20, sticky="w")
 
+        # Configuration
+        self.config_label = ctk.CTkLabel(self.sidebar_frame, text="Configuration:", anchor="w", font=ctk.CTkFont(weight="bold"))
+        self.config_label.grid(row=8, column=0, padx=20, pady=(10, 5), sticky="w")
+
+        self.url_label = ctk.CTkLabel(self.sidebar_frame, text="Server URL:", anchor="w")
+        self.url_label.grid(row=9, column=0, padx=20, pady=(0, 0), sticky="w")
+        
+        self.url_entry = ctk.CTkEntry(self.sidebar_frame, placeholder_text="http://localhost:1234/v1")
+        self.url_entry.grid(row=10, column=0, padx=20, pady=(0, 5))
+        self.url_entry.insert(0, pipeline.LM_STUDIO_BASE_URL)
+
+        self.model_label = ctk.CTkLabel(self.sidebar_frame, text="Model Name:", anchor="w")
+        self.model_label.grid(row=11, column=0, padx=20, pady=(5, 0), sticky="w")
+        
+        self.model_entry = ctk.CTkEntry(self.sidebar_frame, placeholder_text="deepseek-ocr")
+        self.model_entry.grid(row=12, column=0, padx=20, pady=(0, 10))
+        self.model_entry.insert(0, pipeline.MODEL_NAME)
+
         # Start/Stop Buttons
         self.start_button = ctk.CTkButton(self.sidebar_frame, text="Start Processing", command=self.start_processing, fg_color="green", hover_color="darkgreen")
-        self.start_button.grid(row=9, column=0, padx=20, pady=10)
+        self.start_button.grid(row=13, column=0, padx=20, pady=10)
         
         self.stop_button = ctk.CTkButton(self.sidebar_frame, text="Stop", command=self.stop_processing, fg_color="red", hover_color="darkred", state="disabled")
-        self.stop_button.grid(row=10, column=0, padx=20, pady=(0, 20))
+        self.stop_button.grid(row=14, column=0, padx=20, pady=(0, 20))
 
     def create_main_area(self):
         self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
@@ -217,6 +235,11 @@ class OCRApp(ctk.CTk):
         self.input_btn.configure(state="disabled")
         self.output_btn.configure(state="disabled")
         self.watch_checkbox.configure(state="disabled")
+        self.url_entry.configure(state="disabled")
+        self.model_entry.configure(state="disabled")
+        
+        base_url = self.url_entry.get().strip() or pipeline.LM_STUDIO_BASE_URL
+        model_name = self.model_entry.get().strip() or pipeline.MODEL_NAME
         
         mode = "Watch Mode" if self.watch_mode_var.get() else "Batch Mode"
         self.status_label.configure(text=f"Running - {mode}", text_color="green")
@@ -225,13 +248,13 @@ class OCRApp(ctk.CTk):
         # Start thread
         if self.watch_mode_var.get():
             target = pipeline.watch_folder
-            args = (self.input_dir, self.output_dir, self.stop_event)
+            args = (self.input_dir, self.output_dir, self.stop_event, base_url, model_name)
             self.progress_bar.configure(mode="indeterminate")
             self.progress_bar.start()
             self.progress_label.configure(text="Watch Mode Active")
         else:
             target = self.run_batch_wrapper
-            args = ()
+            args = (base_url, model_name)
             self.progress_bar.configure(mode="determinate")
             self.progress_bar.set(0)
             self.progress_label.configure(text="Starting...")
@@ -239,10 +262,16 @@ class OCRApp(ctk.CTk):
         self.worker_thread = threading.Thread(target=target, args=args, daemon=True)
         self.worker_thread.start()
 
-    def run_batch_wrapper(self):
+    def run_batch_wrapper(self, base_url, model_name):
         """Wrapper to run batch processing and then reset UI."""
         try:
-            pipeline.scan_and_process(self.input_dir, self.output_dir, progress_callback=self.update_progress_safe)
+            pipeline.scan_and_process(
+                self.input_dir, 
+                self.output_dir, 
+                progress_callback=self.update_progress_safe,
+                base_url=base_url,
+                model_name=model_name
+            )
         except Exception as e:
             pipeline.logger.error(f"Error in batch processing: {e}")
         finally:
@@ -275,6 +304,8 @@ class OCRApp(ctk.CTk):
             self.input_btn.configure(state="normal")
             self.output_btn.configure(state="normal")
             self.watch_checkbox.configure(state="normal")
+            self.url_entry.configure(state="normal")
+            self.model_entry.configure(state="normal")
             
             self.status_label.configure(text="Finished", text_color="green")
             self.log("Process finished successfully.")
@@ -295,6 +326,8 @@ class OCRApp(ctk.CTk):
         self.input_btn.configure(state="normal")
         self.output_btn.configure(state="normal")
         self.watch_checkbox.configure(state="normal")
+        self.url_entry.configure(state="normal")
+        self.model_entry.configure(state="normal")
         
         if self.watch_mode_var.get():
             self.progress_bar.stop()

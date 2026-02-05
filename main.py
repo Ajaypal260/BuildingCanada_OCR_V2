@@ -119,10 +119,10 @@ def image_to_base64(image: Image.Image) -> str:
     return base64.b64encode(buffer.read()).decode("utf-8")
 
 
-def create_client() -> OpenAI:
+def create_client(base_url: str = LM_STUDIO_BASE_URL) -> OpenAI:
     """Create an OpenAI client configured for LM Studio."""
     return OpenAI(
-        base_url=LM_STUDIO_BASE_URL,
+        base_url=base_url,
         api_key=LM_STUDIO_API_KEY,
         timeout=120.0  # Increase timeout for vision model processing
     )
@@ -184,7 +184,8 @@ def process_image_with_vision(
     client: OpenAI,
     image: Image.Image,
     page_num: int,
-    total_pages: int
+    total_pages: int,
+    model_name: str = MODEL_NAME
 ) -> Optional[str]:
     """
     Send an image to the DeepSeek Vision model and get Markdown output.
@@ -194,6 +195,7 @@ def process_image_with_vision(
         image: PIL Image to process
         page_num: Current page number (for logging)
         total_pages: Total number of pages (for logging)
+        model_name: Name of the model to use
     
     Returns:
         Markdown string or None if processing failed
@@ -205,7 +207,7 @@ def process_image_with_vision(
             logger.info(f"Processing page {page_num}/{total_pages} (attempt {attempt}/{MAX_RETRIES})")
             
             response = client.chat.completions.create(
-                model=MODEL_NAME,
+                model=model_name,
                 messages=[
                     {
                         "role": "system",
@@ -305,17 +307,17 @@ def process_page_task(args: tuple) -> tuple[int, Optional[str]]:
     Worker function for parallel page processing.
     
     Args:
-        args: Tuple of (client, image, page_num, total_pages)
+        args: Tuple of (client, image, page_num, total_pages, model_name)
     
     Returns:
         Tuple of (page_num, markdown_content or None)
     """
-    client, image, page_num, total_pages = args
-    result = process_image_with_vision(client, image, page_num, total_pages)
+    client, image, page_num, total_pages, model_name = args
+    result = process_image_with_vision(client, image, page_num, total_pages, model_name)
     return (page_num, result)
 
 
-def process_pdf(pdf_path: Path, output_dir: Path, client: OpenAI) -> bool:
+def process_pdf(pdf_path: Path, output_dir: Path, client: OpenAI, model_name: str = MODEL_NAME) -> bool:
     """
     Process a single PDF file: convert pages to images, send to vision model,
     and save the combined Markdown output.
@@ -323,6 +325,7 @@ def process_pdf(pdf_path: Path, output_dir: Path, client: OpenAI) -> bool:
     Args:
         pdf_path: Path to the PDF file
         client: OpenAI client instance
+        model_name: Name of the model to use
     
     Returns:
         True if processing succeeded, False otherwise
@@ -350,7 +353,7 @@ def process_pdf(pdf_path: Path, output_dir: Path, client: OpenAI) -> bool:
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 # Prepare tasks
                 tasks = [
-                    (client, img, i + 1, total_pages)
+                    (client, img, i + 1, total_pages, model_name)
                     for i, img in enumerate(images)
                 ]
                 
@@ -375,7 +378,7 @@ def process_pdf(pdf_path: Path, output_dir: Path, client: OpenAI) -> bool:
             
             for i, image in enumerate(images):
                 page_num = i + 1
-                markdown = process_image_with_vision(client, image, page_num, total_pages)
+                markdown = process_image_with_vision(client, image, page_num, total_pages, model_name)
                 if markdown:
                     page_results[page_num] = markdown
         
@@ -411,7 +414,13 @@ def process_pdf(pdf_path: Path, output_dir: Path, client: OpenAI) -> bool:
         return False
 
 
-def scan_and_process(input_dir: Path = INPUT_DIR, output_dir: Path = OUTPUT_DIR, progress_callback: Optional[Callable[[int, int], None]] = None):
+def scan_and_process(
+    input_dir: Path = INPUT_DIR, 
+    output_dir: Path = OUTPUT_DIR, 
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    base_url: str = LM_STUDIO_BASE_URL,
+    model_name: str = MODEL_NAME
+):
     """
     Scan the input directory for PDF files and process them.
     """
@@ -433,15 +442,15 @@ def scan_and_process(input_dir: Path = INPUT_DIR, output_dir: Path = OUTPUT_DIR,
         progress_callback(0, total_files)
     
     # Create client
-    client = create_client()
+    client = create_client(base_url)
     
     # Test connection to LM Studio
     try:
-        logger.info("Testing connection to LM Studio...")
+        logger.info(f"Testing connection to LM Studio at {base_url}...")
         client.models.list()
         logger.info("Successfully connected to LM Studio")
     except Exception as e:
-        logger.error(f"Failed to connect to LM Studio at {LM_STUDIO_BASE_URL}")
+        logger.error(f"Failed to connect to LM Studio at {base_url}")
         logger.error(f"Error: {e}")
         logger.error("Please ensure LM Studio is running with the local server enabled.")
         sys.exit(1)
@@ -466,7 +475,7 @@ def scan_and_process(input_dir: Path = INPUT_DIR, output_dir: Path = OUTPUT_DIR,
             results["skipped"].append(pdf_path.name)
             continue
 
-        success = process_pdf(pdf_path, output_dir, client)
+        success = process_pdf(pdf_path, output_dir, client, model_name)
         if success:
             results["success"].append(pdf_path.name)
             mark_file_as_processed(pdf_path.name)
@@ -485,7 +494,13 @@ def scan_and_process(input_dir: Path = INPUT_DIR, output_dir: Path = OUTPUT_DIR,
         logger.warning(f"Failed files: {', '.join(results['failed'])}")
 
 
-def watch_folder(input_dir: Path = INPUT_DIR, output_dir: Path = OUTPUT_DIR, stop_event=None):
+def watch_folder(
+    input_dir: Path = INPUT_DIR, 
+    output_dir: Path = OUTPUT_DIR, 
+    stop_event=None,
+    base_url: str = LM_STUDIO_BASE_URL,
+    model_name: str = MODEL_NAME
+):
     """
     Continuously watch the input folder for new PDF files.
     Processes files and then moves them to a 'processed' subfolder.
@@ -497,7 +512,7 @@ def watch_folder(input_dir: Path = INPUT_DIR, output_dir: Path = OUTPUT_DIR, sto
     logger.info(f"Watching folder: {input_dir.absolute()}")
     logger.info("Press Ctrl+C to stop")
     
-    client = create_client()
+    client = create_client(base_url)
     
     # Test connection
     try:
@@ -525,7 +540,7 @@ def watch_folder(input_dir: Path = INPUT_DIR, output_dir: Path = OUTPUT_DIR, sto
                     break
                     
                 if pdf_path.name not in processed_files:
-                    success = process_pdf(pdf_path, output_dir, client)
+                    success = process_pdf(pdf_path, output_dir, client, model_name)
                     
                     if success:
                         # Move to processed folder
