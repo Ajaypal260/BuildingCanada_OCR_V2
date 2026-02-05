@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+.DS_Store
+
+# Project specific
+input/*
+!input/.keep
+output/*
+!output/.keep
+pipeline.log
+processed_history.json
+
+# IDE
+.vscode/
+.idea/

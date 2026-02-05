@@ -1,0 +1,20 @@
+# PDF to Markdown Pipeline Dependencies
+# ======================================
+#
+# IMPORTANT: Before installing these, you need poppler for PDF rendering:
+#   macOS:   brew install poppler
+#   Ubuntu:  sudo apt-get install poppler-utils
+#   Windows: Download from https://github.com/oschwartz10612/poppler-windows/releases
+
+# PDF to image conversion
+pdf2image>=1.16.3
+
+# OpenAI-compatible API client (for LM Studio)
+openai>=1.12.0
+
+# Image processing
+Pillow>=10.0.0
+
+# GUI
+customtkinter>=5.2.0
+packaging>=23.0
